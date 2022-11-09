@@ -45,6 +45,12 @@
 
 #include "kmeans.h"
 
+
+#include <cuda.h>
+#include <cublas_v2.h>
+#include "pairwise_sqr_dist.h"
+
+
 static inline int nextPowerOfTwo(int n) {
     n--;
 
@@ -297,26 +303,70 @@ float** cuda_kmeans(float **objects,      /* in: [numObjs][numCoords] */
     checkCuda(cudaMemcpy(deviceMembership, membership,
               numObjs*sizeof(int), cudaMemcpyHostToDevice));
 
+
+    float *sqr_norm_clrs, *sqr_norm_objs, *pw_sqr_dist;
+    float coeff = -2.0, one = 1.0, zero = 0.0;
+
+    cudaMalloc((void**)&sqr_norm_clrs, numClusters * sizeof(float));
+    cudaMalloc((void**)&sqr_norm_objs, numObjs * sizeof(float));
+    cudaMalloc((void**)&pw_sqr_dist, numObjs * numClusters * sizeof(float));
+
+    cublasHandle_t handle;
+    cublasCreate(&handle);
+    cublasSetMathMode(handle, CUBLAS_PEDANTIC_MATH);
+
+    dim3 grid(CEIL_DIV(numObjs, BLOCK_DIM), CEIL_DIV(numClusters, BLOCK_DIM), 1);
+    dim3 block(BLOCK_DIM, BLOCK_DIM, 1);
+
+    float *new_membership = (float*) malloc(numObjs * sizeof(int));
+
     do {
         checkCuda(cudaMemcpy(deviceClusters, dimClusters[0],
                   numClusters*numCoords*sizeof(float), cudaMemcpyHostToDevice));
 
-        find_nearest_cluster
-            <<< numClusterBlocks, numThreadsPerClusterBlock, clusterBlockSharedDataSize >>>
-            (numCoords, numObjs, numClusters,
-             deviceObjects, deviceClusters, deviceMembership, deviceIntermediates);
+        // find_nearest_cluster
+        //     <<< numClusterBlocks, numThreadsPerClusterBlock, clusterBlockSharedDataSize >>>
+        //     (numCoords, numObjs, numClusters,
+        //      deviceObjects, deviceClusters, deviceMembership, deviceIntermediates);
+        // cudaDeviceSynchronize(); checkLastCudaError();
 
+        // compute_delta <<< 1, numReductionThreads, reductionBlockSharedDataSize >>>
+        //     (deviceIntermediates, numClusterBlocks, numReductionThreads);
+
+        // cudaDeviceSynchronize(); checkLastCudaError();
+
+        // int d;
+        // checkCuda(cudaMemcpy(&d, deviceIntermediates,
+        //           sizeof(int), cudaMemcpyDeviceToHost));
+        // delta = (float)d;
+
+
+        pairwiseSquaredDist(
+            handle,
+            deviceClusters, deviceObjects,
+            sqr_norm_clrs, sqr_norm_objs,
+            numObjs, numClusters, numCoords,
+            &coeff, &zero, &one,
+            &grid, &block,
+            pw_sqr_dist
+        );
         cudaDeviceSynchronize(); checkLastCudaError();
 
-        compute_delta <<< 1, numReductionThreads, reductionBlockSharedDataSize >>>
-            (deviceIntermediates, numClusterBlocks, numReductionThreads);
-
+        argMin<<<numClusters, numObjs>>>(pw_sqr_dist, numObjs, numClusters, deviceMembership);
         cudaDeviceSynchronize(); checkLastCudaError();
 
-        int d;
-        checkCuda(cudaMemcpy(&d, deviceIntermediates,
-                  sizeof(int), cudaMemcpyDeviceToHost));
-        delta = (float)d;
+        checkCuda(
+            cudaMemcpy(
+                new_membership, deviceMembership, numObjs * sizeof(int), cudaMemcpyDeviceToHost
+            )
+        );
+        delta = 0.0;
+        for (i = 0; i < numObjs; i++) {
+            if (new_membership[i] != membership[i]) {
+                delta += 1.0;
+            }
+        }
+
 
         checkCuda(cudaMemcpy(membership, deviceMembership,
                   numObjs*sizeof(int), cudaMemcpyDeviceToHost));
@@ -362,6 +412,10 @@ float** cuda_kmeans(float **objects,      /* in: [numObjs][numCoords] */
     checkCuda(cudaFree(deviceMembership));
     checkCuda(cudaFree(deviceIntermediates));
 
+    checkCuda(cudaFree(sqr_norm_clrs));
+    checkCuda(cudaFree(sqr_norm_objs));
+    checkCuda(cudaFree(pw_sqr_dist));
+
     free(dimObjects[0]);
     free(dimObjects);
     free(dimClusters[0]);
@@ -369,6 +423,8 @@ float** cuda_kmeans(float **objects,      /* in: [numObjs][numCoords] */
     free(newClusters[0]);
     free(newClusters);
     free(newClusterSize);
+
+    free(new_membership);
 
     return clusters;
 }

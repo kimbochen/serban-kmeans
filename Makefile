@@ -125,7 +125,7 @@ CUDA_CU_OBJ = $(CUDA_CU_SRC:%.cu=%.o)
 
 cuda: cuda_main
 cuda_main: $(CUDA_C_OBJ) $(CUDA_CU_OBJ)
-	$(NVCC) $(LDFLAGS) -o $@ $(CUDA_C_OBJ) $(CUDA_CU_OBJ)
+	$(NVCC) $(LDFLAGS) -lcublas_static -lculibos -lcudart_static -lpthread -ldl -lcublasLt_static -o $@ $(CUDA_C_OBJ) $(CUDA_CU_OBJ) pairwise_sqr_dist.cu
 
 #---------------------------------------------------------------------
 clean:
